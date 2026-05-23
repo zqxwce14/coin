@@ -1,0 +1,6 @@
+streamlit
+streamlit-autorefresh
+pyupbit
+pandas
+feedparser
+requests
