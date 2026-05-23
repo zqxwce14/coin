@@ -7,14 +7,35 @@ import feedparser
 import requests
 import numpy as np
 import textwrap
+import json
+import os  # [NEW] 파일 저장을 위한 라이브러리 추가
 
-st.set_page_config(page_title="통합 코인 시황 대시보드 V11", layout="wide")
+st.set_page_config(page_title="통합 코인 시황 대시보드 V12", layout="wide")
 
 # ==========================================
-# 0. 세션 상태 초기화
+# 0. 로컬 파일 저장소 세팅 (기억 상자)
 # ==========================================
-if 'confirmed_buy_prices' not in st.session_state:
-    st.session_state.confirmed_buy_prices = {}
+SAVE_FILE = "my_portfolio.json"
+
+# 저장된 파일 읽어오기 함수
+def load_portfolio():
+    if os.path.exists(SAVE_FILE):
+        try:
+            with open(SAVE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    # 파일이 없거나 오류가 나면 빈 상태로 시작
+    return {"coins": [], "prices": {}}
+
+# 파일에 저장하기 함수
+def save_portfolio(coins, prices):
+    with open(SAVE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"coins": coins, "prices": prices}, f, indent=4)
+
+# 앱 실행 시 최초 1회만 파일에서 데이터 불러와서 세션에 넣기
+if 'portfolio' not in st.session_state:
+    st.session_state.portfolio = load_portfolio()
 
 # ==========================================
 # 1. 사이드바: 관심 종목 선택 및 매입단가 입력
@@ -30,11 +51,15 @@ TOP_30_TICKERS = [
 
 ticker_names = [t.replace("KRW-", "") for t in TOP_30_TICKERS]
 
-# [수정된 부분] default 값을 빈 리스트([])로 변경하여 처음엔 아무것도 안 뜨게 만듦
+# 저장된 코인 목록을 기본값(default)으로 설정
+saved_coins = st.session_state.portfolio.get("coins", [])
+# 만약 저장된 코인이 현재 TOP 30 목록에 없는 경우를 방지 (안전 장치)
+valid_saved_coins = [c for c in saved_coins if c in ticker_names]
+
 selected_names = st.sidebar.multiselect(
     "관심 코인을 선택하세요", 
     options=ticker_names, 
-    default=[] 
+    default=valid_saved_coins 
 )
 
 selected_tickers = [f"KRW-{name}" for name in selected_names]
@@ -44,14 +69,21 @@ st.sidebar.subheader("💰 매입단가 입력")
 st.sidebar.caption("미입력(0) 시 현재가 기준으로 추천합니다.")
 
 temp_buy_prices = {}
+saved_prices = st.session_state.portfolio.get("prices", {})
+
 for ticker in selected_tickers:
     coin_name = ticker.replace("KRW-", "")
-    current_val = st.session_state.confirmed_buy_prices.get(ticker, 0.0)
-    temp_buy_prices[ticker] = st.sidebar.number_input(f"{coin_name} 매입가 (원)", min_value=0.0, value=current_val, step=100.0)
+    # 저장된 가격이 있으면 불러오고, 없으면 0.0
+    current_val = saved_prices.get(ticker, 0.0)
+    temp_buy_prices[ticker] = st.sidebar.number_input(f"{coin_name} 매입가 (원)", min_value=0.0, value=float(current_val), step=100.0)
 
-if st.sidebar.button("✅ 적용 확인", use_container_width=True):
-    st.session_state.confirmed_buy_prices = temp_buy_prices.copy()
-    st.sidebar.success("매입단가가 지표에 반영되었습니다!")
+# [적용 및 저장] 버튼
+if st.sidebar.button("💾 적용 및 내 PC에 저장", use_container_width=True):
+    # 세션 상태 업데이트
+    st.session_state.portfolio = {"coins": selected_names, "prices": temp_buy_prices}
+    # 실제 파일로 영구 저장
+    save_portfolio(selected_names, temp_buy_prices)
+    st.sidebar.success("설정이 내 PC에 영구 저장되었습니다! 🚀")
 
 # ==========================================
 # 2. 데이터 수집 및 복합 기술적 지표 계산
@@ -83,16 +115,13 @@ def get_dashboard_data(user_tickers):
                 current_price = df['close'].iloc[-1]
                 value_24h = df['value'].iloc[-1]
                 
-                # MA 계산
                 df['ma5'] = df['close'].rolling(window=5).mean()
                 df['ma20'] = df['close'].rolling(window=20).mean()
                 
-                # 볼린저 밴드 계산 (20일선 기준)
                 df['std'] = df['close'].rolling(window=20).std()
                 df['upper_band'] = df['ma20'] + (2 * df['std'])
                 df['lower_band'] = df['ma20'] - (2 * df['std'])
                 
-                # RSI 계산
                 delta = df['close'].diff()
                 up = delta.where(delta > 0, 0.0)
                 down = -delta.where(delta < 0, 0.0)
@@ -195,7 +224,8 @@ def render_dashboard():
                     target_label = f"방어선 {format_price(target_price)}원"
                     signal_bg = "#3b82f6"
                 
-                buy_price = st.session_state.confirmed_buy_prices.get(ticker, 0.0)
+                # 저장된(확정된) 가격 불러오기
+                buy_price = st.session_state.portfolio.get("prices", {}).get(ticker, 0.0)
                 my_profit_html = ""
                 if buy_price > 0:
                     profit_amt = current_price - buy_price
