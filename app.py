@@ -7,10 +7,16 @@ import feedparser
 import requests
 import numpy as np
 
-st.set_page_config(page_title="통합 코인 시황 대시보드 V7", layout="wide")
+st.set_page_config(page_title="통합 코인 시황 대시보드 V8", layout="wide")
 
 # ==========================================
-# 1. 사이드바: 관심 종목 무제한 선택 및 매입단가 설정
+# 0. 세션 상태 초기화 (확인 버튼을 누르기 전까지 값 저장)
+# ==========================================
+if 'confirmed_buy_prices' not in st.session_state:
+    st.session_state.confirmed_buy_prices = {}
+
+# ==========================================
+# 1. 사이드바: 관심 종목 선택 및 매입단가 입력 (확인 버튼)
 # ==========================================
 st.sidebar.header("🎯 내 관심 종목 설정")
 
@@ -22,7 +28,6 @@ TOP_30_TICKERS = [
 ]
 
 ticker_names = [t.replace("KRW-", "") for t in TOP_30_TICKERS]
-# 선택 수량 제한(max_selections) 해제
 selected_names = st.sidebar.multiselect(
     "관심 코인을 선택하세요", 
     options=ticker_names, 
@@ -35,10 +40,19 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("💰 매입단가 입력")
 st.sidebar.caption("미입력(0) 시 현재가 기준으로 추천합니다.")
 
-buy_prices = {}
+# 임시 저장용 딕셔너리
+temp_buy_prices = {}
 for ticker in selected_tickers:
     coin_name = ticker.replace("KRW-", "")
-    buy_prices[ticker] = st.sidebar.number_input(f"{coin_name} 매입가 (원)", min_value=0.0, value=0.0, step=100.0)
+    # 기존에 저장된 값이 있으면 불러오고, 없으면 0.0으로 세팅
+    current_val = st.session_state.confirmed_buy_prices.get(ticker, 0.0)
+    temp_buy_prices[ticker] = st.sidebar.number_input(f"{coin_name} 매입가 (원)", min_value=0.0, value=current_val, step=100.0)
+
+# [확인] 버튼 추가
+if st.sidebar.button("✅ 적용 확인", use_container_width=True):
+    # 버튼을 누르면 임시 저장된 값들을 진짜 세션 상태에 덮어씌움
+    st.session_state.confirmed_buy_prices = temp_buy_prices.copy()
+    st.sidebar.success("매입단가가 지표에 반영되었습니다!")
 
 # ==========================================
 # 2. 데이터 수집 및 복합 기술적 지표 계산 로직
@@ -53,7 +67,6 @@ def get_dashboard_data(user_tickers):
         max_vol_ticker = None
         max_vol = 0
         
-        # 거래대금 1위 찾기
         for t in top_candidates:
             df_temp = pyupbit.get_ohlcv(t, interval="day", count=1)
             if df_temp is not None and not df_temp.empty:
@@ -65,18 +78,15 @@ def get_dashboard_data(user_tickers):
         details = []
         
         for ticker in final_tickers:
-            # MA20과 RSI 계산을 위해 30일치 데이터 수집
             df = pyupbit.get_ohlcv(ticker, interval="day", count=30)
             if df is not None and not df.empty:
                 open_price = df['open'].iloc[-1]
                 current_price = df['close'].iloc[-1]
                 value_24h = df['value'].iloc[-1]
                 
-                # 복합 지표 계산 (MA5, MA20)
                 df['ma5'] = df['close'].rolling(window=5).mean()
                 df['ma20'] = df['close'].rolling(window=20).mean()
                 
-                # 복합 지표 계산 (RSI 14일)
                 delta = df['close'].diff()
                 up = delta.where(delta > 0, 0.0)
                 down = -delta.where(delta < 0, 0.0)
@@ -136,7 +146,7 @@ def get_filtered_news(query, count=4):
         return [{"title": "뉴스 수집 오류", "link": "#", "time": ""}]
 
 # ==========================================
-# 3. 메인 대시보드 렌더링 (타이틀 삭제)
+# 3. 메인 대시보드 렌더링
 # ==========================================
 
 @st.fragment(run_every="10s")
@@ -170,45 +180,62 @@ def render_dashboard():
                 color = "#ef4444" if change_amt > 0 else "#3b82f6" if change_amt < 0 else "#6b7280"
                 sign = "▲" if change_amt > 0 else "▼" if change_amt < 0 else "-"
                 
-                # 지표 불러오기
                 ma5 = row['ma5']
                 ma20 = row['ma20']
                 rsi = row['rsi']
-                buy_price = buy_prices.get(ticker, 0.0)
                 
-                # 기준가 설정 (매입가가 있으면 매입가, 없으면 현재가)
+                # 버튼으로 '확인'된 매입가만 가져옴
+                buy_price = st.session_state.confirmed_buy_prices.get(ticker, 0.0)
                 base_price = buy_price if buy_price > 0 else current_price
                 
-                # 1주일 방향성 예측 로직 (MA정배열 + RSI 과열여부)
+                # 1주일 방향성 예측 로직
                 if ma5 > ma20 and rsi < 70:
                     forecast = "1주 내 상승 예상"
                     signal_text = "매수 추천"
-                    target_price = base_price * 1.10 # 익절가 +10% 
+                    target_price = base_price * 1.10
                     target_label = f"익절가 {format_price(target_price)}원"
-                    signal_bg = "#ef4444" # 빨강
+                    signal_bg = "#ef4444"
                 else:
                     forecast = "1주 내 하락/조정"
                     signal_text = "매도 추천"
-                    target_price = base_price * 0.95 # 손절가 -5%
+                    target_price = base_price * 0.95
                     target_label = f"손절가 {format_price(target_price)}원"
-                    signal_bg = "#3b82f6" # 파랑
+                    signal_bg = "#3b82f6"
+                
+                # 매입금액이 있는 경우 내 수익/손실 정보 생성
+                my_profit_html = ""
+                if buy_price > 0:
+                    profit_amt = current_price - buy_price
+                    profit_rate = (profit_amt / buy_price) * 100
+                    p_color = "#ef4444" if profit_amt > 0 else "#3b82f6" if profit_amt < 0 else "#6b7280"
+                    p_sign = "+" if profit_amt > 0 else ""
+                    
+                    my_profit_html = f"""
+                    <div style='background-color: #f1f5f9; padding: 6px; border-radius: 6px; margin-bottom: 8px; border-left: 4px solid {p_color};'>
+                        <span style='font-size: 12px; color: #475569;'>내 매입가({format_price(buy_price)}원) 대비</span><br>
+                        <span style='font-size: 14px; font-weight: bold; color: {p_color};'>💰 {p_sign}{format_price(profit_amt)}원 ({p_sign}{profit_rate:.2f}%)</span>
+                    </div>
+                    """
                 
                 # 카드 UI
                 st.markdown(f"""
-                <div style='background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; border-radius: 8px; margin-bottom: 8px;'>
+                <div style='background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; border-radius: 8px; margin-bottom: 12px;'>
                     <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;'>
                         <span style='font-weight: bold; font-size: 15px;'>{coin_name}</span>
                         <span style='background-color: {signal_bg}; color: white; font-size: 11px; padding: 4px 8px; border-radius: 4px;'>
                             {signal_text} ({target_label})
                         </span>
                     </div>
-                    <div style='font-size: 11px; color: #64748b; margin-bottom: 5px;'>💡 분석: {forecast} (RSI: {rsi:.1f})</div>
+                    <div style='font-size: 11px; color: #64748b; margin-bottom: 8px;'>💡 분석: {forecast} (RSI: {rsi:.1f})</div>
+                    
+                    {my_profit_html}
+                    
                     <span style='font-size: 16px; font-weight: bold;'>{format_price(current_price)} 원</span>
                     <span style='color:{color}; font-size: 13px; margin-left: 5px;'>{sign} {format_price(change_amt)} ({change_pct:+.2f}%)</span>
                 </div>
                 """, unsafe_allow_html=True)
 
-    # [Column 3] 호재 및 신규 상장 속보 (최근 3일)
+    # [Column 3] 호재 및 신규 상장 속보
     with col3:
         st.subheader("📰 상장 및 호재 속보")
         st.caption("최근 3일 이내 주요 시장 호재")
@@ -223,7 +250,7 @@ def render_dashboard():
             time_badge = f"`{news['time']}` " if news['time'] else ""
             st.success(f"{time_badge}[{news['title']}]({news['link']})")
 
-    # [Column 4] 시황 뉴스 (최근 3일)
+    # [Column 4] 시황 뉴스
     with col4:
         st.subheader("🌍 3일 이내 시황 뉴스")
         st.caption("글로벌 암호화폐 시장 동향")
