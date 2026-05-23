@@ -6,8 +6,9 @@ import calendar
 import feedparser
 import requests
 import numpy as np
+import textwrap
 
-st.set_page_config(page_title="통합 코인 시황 대시보드 V10", layout="wide")
+st.set_page_config(page_title="통합 코인 시황 대시보드 V11", layout="wide")
 
 # ==========================================
 # 0. 세션 상태 초기화
@@ -28,10 +29,12 @@ TOP_30_TICKERS = [
 ]
 
 ticker_names = [t.replace("KRW-", "") for t in TOP_30_TICKERS]
+
+# [수정된 부분] default 값을 빈 리스트([])로 변경하여 처음엔 아무것도 안 뜨게 만듦
 selected_names = st.sidebar.multiselect(
     "관심 코인을 선택하세요", 
     options=ticker_names, 
-    default=["XRP", "SOL", "ADA", "DOGE"] 
+    default=[] 
 )
 
 selected_tickers = [f"KRW-{name}" for name in selected_names]
@@ -162,7 +165,7 @@ def render_dashboard():
                 else:
                     st.info(f"**{coin_name}** • 자금: {row['volume']:,.0f} 원\n\n🔴 매도: {row['ask_size']:,.0f} | 🔵 매수: {row['bid_size']:,.0f}")
 
-        # [Column 2] 분석 지표 및 1주일 예측 (마크다운 버그 원천 차단)
+        # [Column 2] 분석 지표 및 1주일 예측
         with col2:
             st.subheader("🔍 복합 지표 기반 예측")
             for index, row in coin_data.iterrows():
@@ -200,10 +203,8 @@ def render_dashboard():
                     p_color = "#ef4444" if profit_amt > 0 else "#3b82f6" if profit_amt < 0 else "#6b7280"
                     p_sign = "+" if profit_amt > 0 else ""
                     
-                    # 엔터 없이 한 줄로 작성하여 코드블록 오작동 완벽 차단
                     my_profit_html = f"<div style='background-color: #f1f5f9; padding: 6px; border-radius: 6px; margin-bottom: 8px; border-left: 4px solid {p_color};'><span style='font-size: 12px; color: #475569;'>내 매입가({format_price(buy_price)}원) 대비</span><br><span style='font-size: 14px; font-weight: bold; color: {p_color};'>💰 {p_sign}{format_price(profit_amt)}원 ({p_sign}{profit_rate:.2f}%)</span></div>"
                 
-                # 전체 UI를 한 줄의 HTML 문자열로 결합
                 card_html = f"<div style='background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; border-radius: 8px; margin-bottom: 12px;'><div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;'><span style='font-weight: bold; font-size: 15px;'>{coin_name}</span><span style='background-color: {signal_bg}; color: white; font-size: 11px; padding: 4px 8px; border-radius: 4px;'>{signal_text} ({target_label})</span></div><div style='font-size: 11px; color: #64748b; margin-bottom: 8px;'>💡 분석: {forecast} (RSI: {rsi:.1f})</div>{my_profit_html}<div><span style='font-size: 16px; font-weight: bold;'>{format_price(current_price)} 원</span><span style='color:{color}; font-size: 13px; margin-left: 5px;'>{sign} {format_price(change_amt)} ({change_pct:+.2f}%)</span></div></div>"
                 
                 st.markdown(card_html, unsafe_allow_html=True)
