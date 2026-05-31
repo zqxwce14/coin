@@ -9,8 +9,9 @@ import requests
 import numpy as np
 import json
 import os
+import urllib.parse # [NEW] 네이버 검색 URL 인코딩을 위한 라이브러리
 
-st.set_page_config(page_title="통합 금융 시황 대시보드 V14", layout="wide")
+st.set_page_config(page_title="통합 금융 시황 대시보드 V15", layout="wide")
 
 # ==========================================
 # 0. 로컬 파일 저장소 세팅 (기억 상자 확장)
@@ -49,28 +50,42 @@ view_mode = st.radio(
 )
 
 # ==========================================
-# 2. 실시간 데이터 수집 함수 (주식 거래량 상위 50 - 네이버 금융 연동)
+# 2. 실시간 데이터 수집 함수 (1시간 마다 업데이트 ttl=3600)
 # ==========================================
-@st.cache_data(ttl=300)
+
+# [NEW] 코인 24시간 거래량 상위 100개 자동 수집
+@st.cache_data(ttl=3600)
+def get_top_100_coins():
+    try:
+        markets = pyupbit.get_tickers(fiat="KRW")
+        url = "https://api.upbit.com/v1/ticker?markets=" + ",".join(markets)
+        headers = {"accept": "application/json"}
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        
+        # 거래대금(acc_trade_price_24h) 기준으로 내림차순 정렬
+        sorted_data = sorted(data, key=lambda x: x['acc_trade_price_24h'], reverse=True)
+        top_100_tickers = [item['market'] for item in sorted_data[:100]]
+        top_100_names = [m.replace("KRW-", "") for m in top_100_tickers]
+        
+        return top_100_names, top_100_tickers
+    except:
+        fallback_names = ["BTC", "ETH", "XRP", "SOL", "DOGE"]
+        return fallback_names, [f"KRW-{c}" for c in fallback_names]
+
+# 주식 당일 거래량 상위 50개 자동 수집
+@st.cache_data(ttl=3600)
 def get_top_50_stocks():
     try:
-        # 1. 네이버 금융에서 거래량 상위 종목 크롤링
         url = "https://finance.naver.com/sise/sise_quant.naver"
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers)
-        res.encoding = 'euc-kr' # 한글 깨짐 방지
-        
-        # HTML 표(Table) 추출
+        res.encoding = 'euc-kr' 
         tables = pd.read_html(res.text)
-        df_vol = tables[1] 
-        
-        # 빈 값 제거 후 상위 50개 종목명 추출
-        df_vol = df_vol.dropna(subset=['종목명'])
+        df_vol = tables[1].dropna(subset=['종목명'])
         top_50_names = df_vol['종목명'].head(50).tolist()
         
-        # 2. FinanceDataReader를 이용해 종목명 -> 종목코드(Symbol) 맵핑
         df_krx = fdr.StockListing('KRX')
-        
         stock_options = []
         for name in top_50_names:
             matched = df_krx[df_krx['Name'] == name]
@@ -82,17 +97,16 @@ def get_top_50_stocks():
             return stock_options, None
         else:
             raise Exception("종목 매칭 수량 부족")
-            
     except Exception as e:
-        # 네트워크 오류 등 만약의 상황에 대비한 5개 기본값
         fallback = ["삼성전자 (005930)", "SK하이닉스 (000660)", "현대차 (005380)", "LG에너지솔루션 (373220)", "NAVER (035420)"]
         return fallback, None
 
-# 주식 상위 50개 리스트 확보
+# 시장 데이터 변수 할당
+coin_names, coin_tickers = get_top_100_coins()
 stock_options, df_top50_data = get_top_50_stocks()
 
 # ==========================================
-# 3. 사이드바: 조건 설정 (선택된 메뉴에 따라 유동적 변경)
+# 3. 사이드바: 조건 설정
 # ==========================================
 st.sidebar.header("🎯 내 관심 종목 설정")
 
@@ -105,16 +119,8 @@ temp_coin_prices = {}
 temp_stock_prices = {}
 
 if view_mode == "🪙 가상화폐 대시보드":
-    TOP_30_TICKERS = [
-        "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-ADA", "KRW-DOGE", "KRW-SHIB", "KRW-AVAX", 
-        "KRW-DOT", "KRW-LINK", "KRW-MATIC", "KRW-NEAR", "KRW-BCH", "KRW-ETC", "KRW-STX", "KRW-SUI", 
-        "KRW-APT", "KRW-ARB", "KRW-OP", "KRW-SEI", "KRW-MINA", "KRW-BLUR", "KRW-MASK", "KRW-SAND", 
-        "KRW-MANA", "KRW-ENJ", "KRW-CHZ", "KRW-AAVE", "KRW-THETA", "KRW-WAVES"
-    ]
-    ticker_names = [t.replace("KRW-", "") for t in TOP_30_TICKERS]
-    valid_saved_coins = [c for c in saved_coins if c in ticker_names]
-
-    selected_coins = st.sidebar.multiselect("관심 코인을 선택하세요", options=ticker_names, default=valid_saved_coins)
+    valid_saved_coins = [c for c in saved_coins if c in coin_names]
+    selected_coins = st.sidebar.multiselect("거래대금 상위 100대 코인 선택", options=coin_names, default=valid_saved_coins)
     selected_tickers = [f"KRW-{name}" for name in selected_coins]
 
     st.sidebar.markdown("---")
@@ -124,9 +130,8 @@ if view_mode == "🪙 가상화폐 대시보드":
         current_val = saved_coin_prices.get(ticker, 0.0)
         temp_coin_prices[ticker] = st.sidebar.number_input(f"{coin_name} 매입가 (원)", min_value=0.0, value=float(current_val), step=100.0)
 
-else:  # 국내 주식 모드
+else: 
     valid_saved_stocks = [s for s in saved_stocks if s in stock_options]
-
     selected_stocks = st.sidebar.multiselect("당일 거래량 상위 50대 주식 선택", options=stock_options, default=valid_saved_stocks)
 
     st.sidebar.markdown("---")
@@ -135,7 +140,6 @@ else:  # 국내 주식 모드
         current_val = saved_stock_prices.get(stock, 0.0)
         temp_stock_prices[stock] = st.sidebar.number_input(f"{stock.split(' ')[0]} 매입가 (원)", min_value=0.0, value=float(current_val), step=500.0)
 
-# 공통 저장 버튼
 if st.sidebar.button("💾 적용 및 내 PC에 저장", use_container_width=True):
     if view_mode == "🪙 가상화폐 대시보드":
         st.session_state.portfolio["coins"] = selected_coins
@@ -182,31 +186,21 @@ def get_stock_dashboard_data(user_stocks):
     details = []
     for stock_str in user_stocks:
         try:
-            # "삼성전자 (005930)" 에서 코드 추출
             code = stock_str.split('(')[1].replace(')', '').strip()
             name = stock_str.split('(')[0].strip()
             
-            # 최근 45일간의 일봉 데이터 수집 (안정적인 지표 계산용)
             df = fdr.DataReader(code, (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d'))
             if df is not None and not df.empty:
                 df = calculate_technical_indicators(df)
-                
                 open_price = df['Open'].iloc[-1]
                 current_price = df['Close'].iloc[-1]
-                volume_24h = df['Volume'].iloc[-1] * current_price # 거래대금 근사치
+                volume_24h = df['Volume'].iloc[-1] * current_price 
                 
                 details.append({
-                    "ticker": stock_str,
-                    "name": name,
-                    "open": open_price,
-                    "price": current_price,
-                    "volume": volume_24h,
-                    "ma5": df['ma5'].iloc[-1],
-                    "ma20": df['ma20'].iloc[-1],
-                    "upper_band": df['upper_band'].iloc[-1],
-                    "lower_band": df['lower_band'].iloc[-1],
-                    "rsi": df['rsi'].iloc[-1],
-                    "is_top_volume": False
+                    "ticker": stock_str, "name": name, "open": open_price, "price": current_price, "volume": volume_24h,
+                    "ma5": df['ma5'].iloc[-1], "ma20": df['ma20'].iloc[-1],
+                    "upper_band": df['upper_band'].iloc[-1], "lower_band": df['lower_band'].iloc[-1],
+                    "rsi": df['rsi'].iloc[-1], "is_top_volume": False
                 })
         except:
             continue
@@ -214,7 +208,7 @@ def get_stock_dashboard_data(user_stocks):
     df_details = pd.DataFrame(details)
     if not df_details.empty:
         df_details = df_details.sort_values(by="volume", ascending=False)
-        df_details.iloc[0, df_details.columns.get_loc('is_top_volume')] = True # 첫 번째(거래량 최대) 종목 강조 표시
+        df_details.iloc[0, df_details.columns.get_loc('is_top_volume')] = True 
     return df_details
 
 @st.cache_data(ttl=600)
@@ -248,16 +242,8 @@ def render_combined_dashboard():
     
     if view_mode == "🪙 가상화폐 대시보드":
         try:
-            top_candidates = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-ADA"]
-            max_vol_ticker = None
-            max_vol = 0
-            for t in top_candidates:
-                df_temp = pyupbit.get_ohlcv(t, interval="day", count=1)
-                if df_temp is not None and not df_temp.empty:
-                    if df_temp['value'].iloc[0] > max_vol:
-                        max_vol = df_temp['value'].iloc[0]
-                        max_vol_ticker = t
-            
+            # 전체 시장 1위 코인 강제 표시를 위해 1위 정보 추가 수집
+            max_vol_ticker = coin_tickers[0] if coin_tickers else None
             user_coins = [f"KRW-{c}" for c in st.session_state.portfolio.get("coins", [])]
             final_tickers = list(set(user_coins + [max_vol_ticker])) if max_vol_ticker else user_coins
             
@@ -288,19 +274,28 @@ def render_combined_dashboard():
     # 화면 그리드 배치 출력 시작
     # ----------------------------------------
     if not asset_data.empty:
-        # [Column 1] 거래대금 유입 현황
+        # [Column 1] 거래대금 유입 현황 (네이버 검색 하이퍼링크 추가)
         with col1:
             st.subheader("📈 종목별 자금 유입")
             for _, row in asset_data.iterrows():
+                
+                # [NEW] 네이버 검색 링크 생성 로직
+                search_keyword = f"{row['name']} 주식" if view_mode == "🇰🇷 국내주식 대시보드" else f"{row['name']} 코인"
+                encoded_query = urllib.parse.quote(search_keyword)
+                naver_search_url = f"https://search.naver.com/search.naver?query={encoded_query}"
+                
+                # 마크다운을 통해 이름을 클릭 가능한 하이퍼링크로 변환
+                display_name = f"[{row['name']}]({naver_search_url})"
+                
                 if view_mode == "🪙 가상화폐 대시보드":
                     sub_info = f"🔴 매도: {row.get('ask_size',0):,.0f} | 🔵 매수: {row.get('bid_size',0):,.0f}"
                 else:
                     sub_info = "🏢 국내 주요 거래소 정규 시장 거래 기준"
                     
                 if row['is_top_volume']:
-                    st.error(f"🔥 **[전체 1위] {row['name']}** • 자금: {row['volume']:,.0f} 원\n\n{sub_info}")
+                    st.error(f"🔥 **[전체 1위] {display_name}** 🔍 • 자금: {row['volume']:,.0f} 원\n\n{sub_info}")
                 else:
-                    st.info(f"**{row['name']}** • 자금: {row['volume']:,.0f} 원\n\n{sub_info}")
+                    st.info(f"**{display_name}** 🔍 • 자금: {row['volume']:,.0f} 원\n\n{sub_info}")
 
         # [Column 2] 분석 지표 및 수익률 계산 카드
         with col2:
@@ -323,7 +318,6 @@ def render_combined_dashboard():
                     target_price = lower_band if not np.isnan(lower_band) else row['price'] * 0.95
                     target_label = f"방어선 {format_price(target_price)}원"
                 
-                # 선택 자산 마켓에 따른 매입단가 매칭
                 price_dict_key = "coin_prices" if view_mode == "🪙 가상화폐 대시보드" else "stock_prices"
                 buy_price = st.session_state.portfolio.get(price_dict_key, {}).get(row['ticker'], 0.0)
                 
@@ -340,7 +334,7 @@ def render_combined_dashboard():
     else:
         with col1: st.info("사이드바에서 종목을 선택해 주세요.")
 
-    # [Column 3 & 4] 뉴스 뉴스 영역 (주식/코인 선택에 따라 검색 키워드 타겟 자동 변경)
+    # [Column 3 & 4] 뉴스 뉴스 영역 
     with col3:
         if view_mode == "🪙 가상화폐 대시보드":
             st.subheader("📰 상장 및 호재 속보")
