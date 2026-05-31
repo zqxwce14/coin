@@ -4,3 +4,4 @@ pyupbit
 pandas
 feedparser
 requests
+finance-datareader
