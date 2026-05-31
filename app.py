@@ -10,7 +10,7 @@ import numpy as np
 import json
 import os
 
-st.set_page_config(page_title="통합 금융 시황 대시보드 V13", layout="wide")
+st.set_page_config(page_title="통합 금융 시황 대시보드 V14", layout="wide")
 
 # ==========================================
 # 0. 로컬 파일 저장소 세팅 (기억 상자 확장)
@@ -49,29 +49,46 @@ view_mode = st.radio(
 )
 
 # ==========================================
-# 2. 실시간 데이터 수집 함수 (주식 거래량 상위 50)
+# 2. 실시간 데이터 수집 함수 (주식 거래량 상위 50 - 네이버 금융 연동)
 # ==========================================
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def get_top_50_stocks():
     try:
-        # 한국거래소 전체 종목 가져오기
+        # 1. 네이버 금융에서 거래량 상위 종목 크롤링
+        url = "https://finance.naver.com/sise/sise_quant.naver"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        res = requests.get(url, headers=headers)
+        res.encoding = 'euc-kr' # 한글 깨짐 방지
+        
+        # HTML 표(Table) 추출
+        tables = pd.read_html(res.text)
+        df_vol = tables[1] 
+        
+        # 빈 값 제거 후 상위 50개 종목명 추출
+        df_vol = df_vol.dropna(subset=['종목명'])
+        top_50_names = df_vol['종목명'].head(50).tolist()
+        
+        # 2. FinanceDataReader를 이용해 종목명 -> 종목코드(Symbol) 맵핑
         df_krx = fdr.StockListing('KRX')
-        # 최근 거래일의 상세 시세(거래량 포함) 가져오기
-        df_market = fdr.StockListing('KRX-MARKT')
         
-        # 종목코드 기준으로 병합하여 거래량 상위 50개 추출
-        df_merged = pd.merge(df_market, df_krx[['Code', 'Name']], on='Code', how='inner')
-        df_top50 = df_merged.sort_values(by='Volume', ascending=False).head(50)
+        stock_options = []
+        for name in top_50_names:
+            matched = df_krx[df_krx['Name'] == name]
+            if not matched.empty:
+                code = matched['Symbol'].values[0]
+                stock_options.append(f"{name} ({code})")
         
-        # '삼성전자 (005930)' 형태로 리스트 생성
-        stock_options = [f"{row['Name']} ({row['Code']})" for _, row in df_top50.iterrows()]
-        return stock_options, df_top50
-    except:
-        # 예외 발생 시 기본 대형주 리스트 반환
-        fallback = ["삼성전자 (005930)", "SK하이닉스 (000660)", "현대차 (005380)", "LGenergy(373220)", "NAVER(035420)"]
+        if len(stock_options) > 10:
+            return stock_options, None
+        else:
+            raise Exception("종목 매칭 수량 부족")
+            
+    except Exception as e:
+        # 네트워크 오류 등 만약의 상황에 대비한 5개 기본값
+        fallback = ["삼성전자 (005930)", "SK하이닉스 (000660)", "현대차 (005380)", "LG에너지솔루션 (373220)", "NAVER (035420)"]
         return fallback, None
 
-# 주식 상위 50개 리스트 및 데이터 확보
+# 주식 상위 50개 리스트 확보
 stock_options, df_top50_data = get_top_50_stocks()
 
 # ==========================================
@@ -109,8 +126,6 @@ if view_mode == "🪙 가상화폐 대시보드":
 
 else:  # 국내 주식 모드
     valid_saved_stocks = [s for s in saved_stocks if s in stock_options]
-    if not valid_saved_stocks and stock_options:
-        valid_saved_stocks = [stock_options[0]] # 기본값 방어
 
     selected_stocks = st.sidebar.multiselect("당일 거래량 상위 50대 주식 선택", options=stock_options, default=valid_saved_stocks)
 
@@ -232,7 +247,6 @@ def render_combined_dashboard():
     col1, col2, col3, col4 = st.columns(4)
     
     if view_mode == "🪙 가상화폐 대시보드":
-        # 기존 제공해주신 코인 수집 로직 작동
         try:
             top_candidates = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-ADA"]
             max_vol_ticker = None
