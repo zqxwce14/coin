@@ -9,9 +9,10 @@ import requests
 import numpy as np
 import json
 import os
-import urllib.parse # [NEW] 네이버 검색 URL 인코딩을 위한 라이브러리
+import urllib.parse
+import io # [NEW] 최신 Pandas HTML 파싱 호환성을 위한 라이브러리
 
-st.set_page_config(page_title="통합 금융 시황 대시보드 V15", layout="wide")
+st.set_page_config(page_title="통합 금융 시황 대시보드 V16", layout="wide")
 
 # ==========================================
 # 0. 로컬 파일 저장소 세팅 (기억 상자 확장)
@@ -53,7 +54,7 @@ view_mode = st.radio(
 # 2. 실시간 데이터 수집 함수 (1시간 마다 업데이트 ttl=3600)
 # ==========================================
 
-# [NEW] 코인 24시간 거래량 상위 100개 자동 수집
+# 코인 24시간 거래량 상위 100개 자동 수집
 @st.cache_data(ttl=3600)
 def get_top_100_coins():
     try:
@@ -63,7 +64,6 @@ def get_top_100_coins():
         response = requests.get(url, headers=headers)
         data = response.json()
         
-        # 거래대금(acc_trade_price_24h) 기준으로 내림차순 정렬
         sorted_data = sorted(data, key=lambda x: x['acc_trade_price_24h'], reverse=True)
         top_100_tickers = [item['market'] for item in sorted_data[:100]]
         top_100_names = [m.replace("KRW-", "") for m in top_100_tickers]
@@ -73,16 +73,29 @@ def get_top_100_coins():
         fallback_names = ["BTC", "ETH", "XRP", "SOL", "DOGE"]
         return fallback_names, [f"KRW-{c}" for c in fallback_names]
 
-# 주식 당일 거래량 상위 50개 자동 수집
+# [BUG FIX] 주식 당일 거래량 상위 50개 완벽 수집 로직 수정
 @st.cache_data(ttl=3600)
 def get_top_50_stocks():
     try:
         url = "https://finance.naver.com/sise/sise_quant.naver"
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         res = requests.get(url, headers=headers)
         res.encoding = 'euc-kr' 
-        tables = pd.read_html(res.text)
-        df_vol = tables[1].dropna(subset=['종목명'])
+        
+        # 최신 pandas 에러 방지를 위해 io.StringIO 사용
+        tables = pd.read_html(io.StringIO(res.text))
+        
+        # '종목명'이 포함된 테이블 찾기
+        df_vol = None
+        for tbl in tables:
+            if '종목명' in tbl.columns:
+                df_vol = tbl
+                break
+                
+        if df_vol is None:
+            raise Exception("종목명 테이블 찾기 실패")
+            
+        df_vol = df_vol.dropna(subset=['종목명'])
         top_50_names = df_vol['종목명'].head(50).tolist()
         
         df_krx = fdr.StockListing('KRX')
@@ -90,7 +103,13 @@ def get_top_50_stocks():
         for name in top_50_names:
             matched = df_krx[df_krx['Name'] == name]
             if not matched.empty:
-                code = matched['Symbol'].values[0]
+                # FinanceDataReader 버전별 컬럼명(Code 또는 Symbol) 완벽 호환
+                if 'Code' in matched.columns:
+                    code = matched['Code'].values[0]
+                elif 'Symbol' in matched.columns:
+                    code = matched['Symbol'].values[0]
+                else:
+                    continue
                 stock_options.append(f"{name} ({code})")
         
         if len(stock_options) > 10:
@@ -242,7 +261,6 @@ def render_combined_dashboard():
     
     if view_mode == "🪙 가상화폐 대시보드":
         try:
-            # 전체 시장 1위 코인 강제 표시를 위해 1위 정보 추가 수집
             max_vol_ticker = coin_tickers[0] if coin_tickers else None
             user_coins = [f"KRW-{c}" for c in st.session_state.portfolio.get("coins", [])]
             final_tickers = list(set(user_coins + [max_vol_ticker])) if max_vol_ticker else user_coins
@@ -279,12 +297,10 @@ def render_combined_dashboard():
             st.subheader("📈 종목별 자금 유입")
             for _, row in asset_data.iterrows():
                 
-                # [NEW] 네이버 검색 링크 생성 로직
                 search_keyword = f"{row['name']} 주식" if view_mode == "🇰🇷 국내주식 대시보드" else f"{row['name']} 코인"
                 encoded_query = urllib.parse.quote(search_keyword)
                 naver_search_url = f"https://search.naver.com/search.naver?query={encoded_query}"
                 
-                # 마크다운을 통해 이름을 클릭 가능한 하이퍼링크로 변환
                 display_name = f"[{row['name']}]({naver_search_url})"
                 
                 if view_mode == "🪙 가상화폐 대시보드":
