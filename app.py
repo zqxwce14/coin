@@ -10,12 +10,11 @@ import numpy as np
 import json
 import os
 import urllib.parse
-import io # [NEW] 최신 Pandas HTML 파싱 호환성을 위한 라이브러리
 
-st.set_page_config(page_title="통합 금융 시황 대시보드 V16", layout="wide")
+st.set_page_config(page_title="통합 금융 시황 대시보드 V17", layout="wide")
 
 # ==========================================
-# 0. 로컬 파일 저장소 세팅 (기억 상자 확장)
+# 0. 로컬 파일 저장소 세팅 (기억 상자)
 # ==========================================
 SAVE_FILE = "my_financial_portfolio.json"
 
@@ -51,11 +50,11 @@ view_mode = st.radio(
 )
 
 # ==========================================
-# 2. 실시간 데이터 수집 함수 (1시간 마다 업데이트 ttl=3600)
+# 2. 실시간 데이터 수집 함수
 # ==========================================
 
-# 코인 24시간 거래량 상위 100개 자동 수집
-@st.cache_data(ttl=3600)
+# 코인 24시간 거래량 상위 100개 
+@st.cache_data(ttl=60) # 체감을 위해 1분 주기로 설정 (필요시 3600으로 변경)
 def get_top_100_coins():
     try:
         markets = pyupbit.get_tickers(fiat="KRW")
@@ -73,54 +72,48 @@ def get_top_100_coins():
         fallback_names = ["BTC", "ETH", "XRP", "SOL", "DOGE"]
         return fallback_names, [f"KRW-{c}" for c in fallback_names]
 
-# [BUG FIX] 주식 당일 거래량 상위 50개 완벽 수집 로직 수정
-@st.cache_data(ttl=3600)
+# [V17 핵심 수정] 주식 당일 거래량 상위 50개 API 통신 방식으로 우회 (차단 방지)
+@st.cache_data(ttl=60) # 체감을 위해 1분 주기로 설정
 def get_top_50_stocks():
     try:
-        url = "https://finance.naver.com/sise/sise_quant.naver"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        res = requests.get(url, headers=headers)
-        res.encoding = 'euc-kr' 
+        headers = {'User-Agent': 'Mozilla/5.0'}
         
-        # 최신 pandas 에러 방지를 위해 io.StringIO 사용
-        tables = pd.read_html(io.StringIO(res.text))
+        # 네이버 모바일 전용 API로 코스피/코스닥 각각 상위 50개 호출 (HTML 구조 변동 및 차단 무시)
+        url_kospi = "https://m.stock.naver.com/api/stocks/volume/KOSPI?page=1&pageSize=50"
+        url_kosdaq = "https://m.stock.naver.com/api/stocks/volume/KOSDAQ?page=1&pageSize=50"
         
-        # '종목명'이 포함된 테이블 찾기
-        df_vol = None
-        for tbl in tables:
-            if '종목명' in tbl.columns:
-                df_vol = tbl
-                break
+        res_kospi = requests.get(url_kospi, headers=headers).json().get('stocks', [])
+        res_kosdaq = requests.get(url_kosdaq, headers=headers).json().get('stocks', [])
+        
+        combined = res_kospi + res_kosdaq
+        
+        def parse_vol(v):
+            try:
+                return int(str(v).replace(',', ''))
+            except:
+                return 0
                 
-        if df_vol is None:
-            raise Exception("종목명 테이블 찾기 실패")
-            
-        df_vol = df_vol.dropna(subset=['종목명'])
-        top_50_names = df_vol['종목명'].head(50).tolist()
+        # 거래량 순으로 통합 내림차순 정렬
+        sorted_stocks = sorted(combined, key=lambda x: parse_vol(x.get('accumulatedTradingVolume', 0)), reverse=True)
         
-        df_krx = fdr.StockListing('KRX')
+        # 전체 시장 통합 상위 50개 추출
+        top_50 = sorted_stocks[:50]
+        
         stock_options = []
-        for name in top_50_names:
-            matched = df_krx[df_krx['Name'] == name]
-            if not matched.empty:
-                # FinanceDataReader 버전별 컬럼명(Code 또는 Symbol) 완벽 호환
-                if 'Code' in matched.columns:
-                    code = matched['Code'].values[0]
-                elif 'Symbol' in matched.columns:
-                    code = matched['Symbol'].values[0]
-                else:
-                    continue
-                stock_options.append(f"{name} ({code})")
-        
+        for s in top_50:
+            name = s.get('stockName')
+            code = s.get('itemCode')
+            stock_options.append(f"{name} ({code})")
+            
         if len(stock_options) > 10:
             return stock_options, None
         else:
-            raise Exception("종목 매칭 수량 부족")
+            raise Exception("API 데이터 부족")
+            
     except Exception as e:
         fallback = ["삼성전자 (005930)", "SK하이닉스 (000660)", "현대차 (005380)", "LG에너지솔루션 (373220)", "NAVER (035420)"]
         return fallback, None
 
-# 시장 데이터 변수 할당
 coin_names, coin_tickers = get_top_100_coins()
 stock_options, df_top50_data = get_top_50_stocks()
 
